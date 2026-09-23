@@ -1,112 +1,96 @@
+// The shared recommendation engine. This is the ONLY place the recommendation
+// logic lives. Both surfaces (the Web API in index.ts and the MCP server in
+// mcp.ts) call recommend() and just shape the result.
+//
+// The input can be a GitHub repo (URL or owner/repo) OR a website URL. Either
+// way we produce an Analysis (purpose, stack, search queries), then run the same
+// GitHub search and ranking. Recommendations are always GitHub repos.
+import { parseRepo, getRepo, getReadme, searchRepos, getContributorCount, getCommitsSince, type RepoMeta, } from "./github";
+import { callOpenAI, parseStructured, MODELS, type JsonSchemaFormat } from "./openai";
+export interface EngineEnv {
+    OPENAI_API_KEY?: string;
+    GITHUB_TOKEN?: string;
 }
-export function normalizeUrl(input: string): string {
-    const s = input.trim();
-    const value = /^https?:\/\//i.test(s) ? s : `https://${s}`;
-    const url = new URL(value);
-    if (!/^https?:$/.test(url.protocol))
-        throw new InputError("Only http and https websites are supported.");
-    if (!isPublicHostname(url.hostname))
-        throw new InputError("Private or local network addresses are not supported.");
-    url.username = "";
-    url.password = "";
-    url.hash = "";
-    return url.pathname === "/" && !url.search ? url.origin : url.toString();
+export class InputError extends Error {
 }
-async function fetchSite(input: string): Promise<{
-    host: string;
-    title: string;
-    text: string;
-}> {
-    const url = normalizeUrl(input);
-    let res: Response;
-    try {
-        res = await fetchPublicPage(url);
-    }
-    catch {
-        throw new Error("Could not reach that website.");
-    }
-    if (!res.ok)
-        throw new Error(`Could not fetch that website (${res.status}).`);
-    const contentType = res.headers.get("content-type") || "";
-    if (!contentType.toLowerCase().includes("text/html")) {
-        throw new Error("That address did not return an HTML page.");
-    }
-    const html = await res.text();
-    const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] ?? "").trim();
-    const desc = (html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i)?.[1] ?? "").trim();
-    const body = htmlToText(html);
-    const text = [desc, body].filter(Boolean).join("\n").slice(0, 5000);
-    return { host: new URL(url).host.replace(/^www\./, ""), title, text };
+export interface Recommendation {
+    fullName: string;
+    url: string;
+    stars: number;
+    forks: number;
+    language: string | null;
+    lastUpdated: string | null; // ISO date of last push
+    contributors: number | null; // null when GitHub did not return it
+    velocity90d: number | null; // commits in the last 90 days
+    whatIsIt: string;
+    why: string;
+    how: string;
+    ratings: {
+        easeOfUse: number;
+        impact: number;
+    };
 }
-async function fetchPublicPage(start: string): Promise<Response> {
-    let current = new URL(start);
-    for (let redirects = 0; redirects <= 3; redirects++) {
-        if (!isPublicHostname(current.hostname))
-            throw new Error("blocked host");
-        const response = await fetch(current.toString(), {
-            headers: { "User-Agent": "repofinder (https://repofinder.io)", Accept: "text/html" },
-            redirect: "manual",
-        });
-        if (![301, 302, 303, 307, 308].includes(response.status))
-            return response;
-        const location = response.headers.get("location");
-        if (!location)
-            return response;
-        current = new URL(location, current);
-        if (!/^https?:$/.test(current.protocol))
-            throw new Error("blocked protocol");
-    }
-    throw new Error("too many redirects");
+export interface RecommendResult {
+    source: {
+        fullName: string;
+        kind: "repo" | "website";
+        purpose: string;
+        stack: string[];
+    };
+    goal: string;
+    mode: "openai" | "github-fallback";
+    recommendations: Recommendation[];
 }
-export function isPublicHostname(hostname: string): boolean {
-    const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    if (host === "localhost" ||
-        host.endsWith(".localhost") ||
-        host.endsWith(".local") ||
-        host.endsWith(".internal") ||
-        host.includes(":"))
-        return false;
-    const match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (!match)
-        return true;
-    const octets = match.slice(1).map(Number);
-    if (octets.some((part) => part > 255))
-        return false;
-    const [a, b] = octets;
-    return !(a === 0 ||
-        a === 10 ||
-        a === 127 ||
-        (a === 169 && b === 254) ||
-        (a === 172 && b! >= 16 && b! <= 31) ||
-        (a === 192 && b === 168) ||
-        a! >= 224);
+interface Analysis {
+    purpose: string;
+    stack: string[];
+    searchQueries: string[];
 }
-export function htmlToText(html: string): string {
-    return html
-        .replace(/<script[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style[\s\S]*?<\/style>/gi, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/\s+/g, " ")
-        .trim();
+interface SourceContext extends Analysis {
+    fullName: string;
+    kind: "repo" | "website";
+    langHint?: string;
+    exclude?: string;
 }
-export function clamp(n: number): number {
-    if (typeof n !== "number" || Number.isNaN(n))
-        return 3;
-    return Math.max(1, Math.min(5, Math.round(n)));
-}
-// Human-readable age of the last push, shown to the ranker as a maintenance
-// signal so it can avoid recommending abandoned repos.
-function relativeAge(iso: string | null): string {
-    if (!iso)
-        return "unknown";
-    const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
-    if (days < 30)
-        return "this month";
-    if (days < 365)
-        return `${Math.floor(days / 30)}mo ago`;
-    return `${(days / 365).toFixed(1).replace(/\.0$/, "")}y ago`;
-}
+const analysisFormat: JsonSchemaFormat = {
+    name: "source_analysis",
+    description: "A concise project analysis plus GitHub search queries.",
+    schema: {
+        type: "object",
+        properties: {
+            purpose: { type: "string" },
+            stack: { type: "array", items: { type: "string" } },
+            searchQueries: { type: "array", minItems: 2, maxItems: 3, items: { type: "string" } },
+        },
+        required: ["purpose", "stack", "searchQueries"],
+        additionalProperties: false,
+    },
+};
+const curationFormat: JsonSchemaFormat = {
+    name: "repo_recommendations",
+    description: "The best complementary repositories and project-specific integration guidance.",
+    schema: {
+        type: "object",
+        properties: {
+            recommendations: {
+                type: "array",
+                minItems: 1,
+                maxItems: 5,
+                items: {
+                    type: "object",
+                    properties: {
+                        fullName: { type: "string" },
+                        whatIsIt: { type: "string" },
+                        why: { type: "string" },
+                        how: { type: "string" },
+                        easeOfUse: { type: "integer", minimum: 1, maximum: 5 },
+                        impact: { type: "integer", minimum: 1, maximum: 5 },
+                    },
+                    required: ["fullName", "whatIsIt", "why", "how", "easeOfUse", "impact"],
+                    additionalProperties: false,
+                },
+            },
+        },
+        required: ["recommendations"],
+        additionalProperties: false,
+    },

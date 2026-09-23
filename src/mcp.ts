@@ -1,5 +1,5 @@
-// Surface 2: a stateless MCP server over Streamable HTTP. It exposes the same
-// recommendation engine as the browser API, with no duplicate ranking logic.
+// Stateless MCP server over Streamable HTTP. It exposes the same recommendation
+// engine as the browser API without duplicating recommendation logic.
 
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
@@ -29,12 +29,18 @@ function createRepoFinderServer(env: EngineEnv): McpServer {
 }
 
 export function handleMcpRequest(request: Request, env: EngineEnv, ctx: ExecutionContext): Promise<Response> {
+  // Allow the hostname Cloudflare actually assigned to this deployment. This
+  // keeps the MCP handler compatible with workers.dev now and a custom domain
+  // later, without hard-coding the original author's repofinder.io hostname.
+  const requestHost = new URL(request.url).hostname;
+  const localHosts = ["localhost", "127.0.0.1", "[::1]"];
+
   const handler = createMcpHandler(() => createRepoFinderServer(env), {
     route: "/mcp",
     legacy: "stateless",
-    allowedHostnames: ["repofinder.io", "localhost", "127.0.0.1", "[::1]"],
-    allowedOriginHostnames: ["repofinder.io", "localhost", "127.0.0.1", "[::1]"],
-    corsOptions: { origin: "https://repofinder.io" },
+    allowedHostnames: [requestHost, ...localHosts],
+    allowedOriginHostnames: [requestHost, "chatgpt.com", "chat.openai.com", ...localHosts],
+    corsOptions: { origin: "*" },
   });
   return handler(request, env, ctx);
 }

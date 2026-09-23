@@ -1,9 +1,11 @@
 // GitHub REST helpers. The engine calls these server-side; we never expose the
 // token to the browser. A token is optional but lifts the rate limit from 60 to
-// 5000 requests per hour. See lessons/14-secrets-and-keys.md.
+// 5000 requests per hour. If a configured token is rejected with 401, public
+// requests are retried without authentication so a stale token does not take
+// the whole MCP service down.
 
 const API = "https://api.github.com";
-const UA = "repofinder (https://repofinder.io)";
+const UA = "repofinder-mcp";
 
 export interface RepoMeta {
   fullName: string;
@@ -31,6 +33,19 @@ function headers(token?: string): HeadersInit {
   return h;
 }
 
+async function githubFetch(url: string, token?: string): Promise<Response> {
+  let res = await fetch(url, { headers: headers(token) });
+
+  // A stale/revoked token should not break public-repository lookups. Retry once
+  // without authentication; genuinely private resources will still fail.
+  if (res.status === 401 && token) {
+    console.log("GitHub token rejected; retrying request without authentication");
+    res = await fetch(url, { headers: headers() });
+  }
+
+  return res;
+}
+
 /** Accept a full GitHub URL or a bare "owner/repo" string. */
 export function parseRepo(input: string): { owner: string; repo: string } | null {
   const trimmed = input.trim();
@@ -47,7 +62,7 @@ export function parseRepo(input: string): { owner: string; repo: string } | null
 }
 
 export async function getRepo(owner: string, repo: string, token?: string): Promise<RepoMeta> {
-  const res = await fetch(`${API}/repos/${owner}/${repo}`, { headers: headers(token) });
+  const res = await githubFetch(`${API}/repos/${owner}/${repo}`, token);
   if (!res.ok) throw new Error(`GitHub repo ${owner}/${repo}: ${res.status}`);
   const d = (await res.json()) as Record<string, any>;
   return {
@@ -74,7 +89,7 @@ export async function getReadme(
   token?: string,
   maxChars = 6000,
 ): Promise<string> {
-  const res = await fetch(`${API}/repos/${owner}/${repo}/readme`, { headers: headers(token) });
+  const res = await githubFetch(`${API}/repos/${owner}/${repo}/readme`, token);
   if (!res.ok) return "";
   const d = (await res.json()) as { content?: string; encoding?: string };
   if (!d.content || d.encoding !== "base64") return "";
@@ -91,7 +106,7 @@ export async function searchRepos(
   exclude?: string,
 ): Promise<RepoMeta[]> {
   const url = `${API}/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=${perPage}`;
-  const res = await fetch(url, { headers: headers(token) });
+  const res = await githubFetch(url, token);
   if (!res.ok) throw new Error(`GitHub search: ${res.status}`);
   const d = (await res.json()) as { items?: Record<string, any>[] };
   const items = d.items ?? [];
@@ -120,7 +135,7 @@ export async function searchRepos(
 async function countViaLink(url: string, token?: string): Promise<number | null> {
   let res: Response;
   try {
-    res = await fetch(url, { headers: headers(token) });
+    res = await githubFetch(url, token);
   } catch {
     return null;
   }

@@ -1,96 +1,115 @@
-// The shared recommendation engine. This is the ONLY place the recommendation
-// logic lives. Both surfaces (the Web API in index.ts and the MCP server in
-// mcp.ts) call recommend() and just shape the result.
-//
-// The input can be a GitHub repo (URL or owner/repo) OR a website URL. Either
-// way we produce an Analysis (purpose, stack, search queries), then run the same
-// GitHub search and ranking. Recommendations are always GitHub repos.
-import { parseRepo, getRepo, getReadme, searchRepos, getContributorCount, getCommitsSince, type RepoMeta, } from "./github";
-import { callOpenAI, parseStructured, MODELS, type JsonSchemaFormat } from "./openai";
-export interface EngineEnv {
-    OPENAI_API_KEY?: string;
-    GITHUB_TOKEN?: string;
+    current = new URL(location, current);
+    if (!/^https?:$/.test(current.protocol)) {
+      throw new Error("blocked protocol");
+    }
+  }
+
+  throw new Error("too many redirects");
 }
-export class InputError extends Error {
+
+export function isPublicHostname(hostname: string): boolean {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
+
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    host.includes(":")
+  ) {
+    return false;
+  }
+
+  const match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!match) {
+    return true;
+  }
+
+  const octets = match.slice(1).map(Number);
+  if (octets.some((part) => part > 255)) {
+    return false;
+  }
+
+  const [a, b, c] = octets;
+
+  return !(
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b! >= 64 && b! <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b! >= 16 && b! <= 31) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0 && c === 2) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a! >= 224
+  );
 }
-export interface Recommendation {
-    fullName: string;
-    url: string;
-    stars: number;
-    forks: number;
-    language: string | null;
-    lastUpdated: string | null; // ISO date of last push
-    contributors: number | null; // null when GitHub did not return it
-    velocity90d: number | null; // commits in the last 90 days
-    whatIsIt: string;
-    why: string;
-    how: string;
-    ratings: {
-        easeOfUse: number;
-        impact: number;
-    };
+
+function extractMetaDescription(html: string): string {
+  const nameThenContent = html.match(
+    /<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["'][^>]*>/i,
+  )?.[1];
+  const contentThenName = html.match(
+    /<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["'][^>]*>/i,
+  )?.[1];
+
+  return decodeBasicEntities((nameThenContent ?? contentThenName ?? "").trim());
 }
-export interface RecommendResult {
-    source: {
-        fullName: string;
-        kind: "repo" | "website";
-        purpose: string;
-        stack: string[];
-    };
-    goal: string;
-    mode: "openai" | "github-fallback";
-    recommendations: Recommendation[];
+
+function decodeBasicEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
 }
-interface Analysis {
-    purpose: string;
-    stack: string[];
-    searchQueries: string[];
+
+export function htmlToText(html: string): string {
+  return decodeBasicEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  )
+    .replace(/\s+/g, " ")
+    .trim();
 }
-interface SourceContext extends Analysis {
-    fullName: string;
-    kind: "repo" | "website";
-    langHint?: string;
-    exclude?: string;
+
+export function clamp(n: number): number {
+  if (typeof n !== "number" || Number.isNaN(n)) {
+    return 3;
+  }
+  return Math.max(1, Math.min(5, Math.round(n)));
 }
-const analysisFormat: JsonSchemaFormat = {
-    name: "source_analysis",
-    description: "A concise project analysis plus GitHub search queries.",
-    schema: {
-        type: "object",
-        properties: {
-            purpose: { type: "string" },
-            stack: { type: "array", items: { type: "string" } },
-            searchQueries: { type: "array", minItems: 2, maxItems: 3, items: { type: "string" } },
-        },
-        required: ["purpose", "stack", "searchQueries"],
-        additionalProperties: false,
-    },
-};
-const curationFormat: JsonSchemaFormat = {
-    name: "repo_recommendations",
-    description: "The best complementary repositories and project-specific integration guidance.",
-    schema: {
-        type: "object",
-        properties: {
-            recommendations: {
-                type: "array",
-                minItems: 1,
-                maxItems: 5,
-                items: {
-                    type: "object",
-                    properties: {
-                        fullName: { type: "string" },
-                        whatIsIt: { type: "string" },
-                        why: { type: "string" },
-                        how: { type: "string" },
-                        easeOfUse: { type: "integer", minimum: 1, maximum: 5 },
-                        impact: { type: "integer", minimum: 1, maximum: 5 },
-                    },
-                    required: ["fullName", "whatIsIt", "why", "how", "easeOfUse", "impact"],
-                    additionalProperties: false,
-                },
-            },
-        },
-        required: ["recommendations"],
-        additionalProperties: false,
-    },
+
+function relativeAge(iso: string | null): string {
+  if (!iso) {
+    return "unknown";
+  }
+
+  const timestamp = new Date(iso).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return "unknown";
+  }
+
+  const days = Math.max(0, Math.floor((Date.now() - timestamp) / 86_400_000));
+  if (days < 30) {
+    return "this month";
+  }
+  if (days < 365) {
+    return `${Math.floor(days / 30)}mo ago`;
+  }
+  return `${(days / 365).toFixed(1).replace(/\.0$/, "")}y ago`;
+}

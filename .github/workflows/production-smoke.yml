@@ -1,9 +1,7 @@
 name: production smoke
 
 on:
-  workflow_run:
-    workflows:
-      - checks
+  check_run:
     types:
       - completed
   workflow_dispatch:
@@ -19,9 +17,9 @@ jobs:
   smoke:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.event == 'push')
+      (github.event.check_run.name == 'Workers Builds: repofinder-mcp' &&
+       github.event.check_run.app.slug == 'cloudflare-workers-and-pages' &&
+       github.event.check_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 3
 
@@ -33,7 +31,7 @@ jobs:
           for attempt in {1..12}; do
             body="$(curl --fail --silent --show-error --max-time 10 "$HEALTH_URL" || true)"
             if [[ "$body" == *'"ok":true'* && "$body" == *'"service":"repofinder-mcp"'* ]]; then
-              echo "Production MCP health check passed."
+              echo "Production MCP health check passed after Cloudflare deployment."
               exit 0
             fi
 

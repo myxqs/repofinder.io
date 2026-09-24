@@ -69,3 +69,7 @@ No D1 database, custom domain, or other Cloudflare resource is required for the 
 ## Security note
 
 This first deployment is a public, read-only MCP endpoint intended to prove the ChatGPT → custom MCP → GitHub path. Before adding write-capable tools or private data sources, add proper authentication and a permission boundary rather than extending the no-auth deployment.
+
+## Operations
+
+For the normal merge/deploy path, production health checks, dependency-update procedure, and emergency rollback commands, see [MCP_OPERATIONS.md](./MCP_OPERATIONS.md).

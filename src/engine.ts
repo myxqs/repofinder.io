@@ -114,6 +114,40 @@ const QUERY_STOP_WORDS = new Set([
   "plus",
   "including",
   "using",
+  "about",
+  "around",
+  "as",
+  "at",
+  "by",
+  "from",
+  "in",
+  "into",
+  "on",
+  "via",
+  "help",
+  "helps",
+  "helping",
+  "useful",
+  "capability",
+  "capabilities",
+  "build",
+  "building",
+  "built",
+  "develop",
+  "developing",
+  "development",
+  "improve",
+  "improving",
+  "harden",
+  "hardening",
+  "deploy",
+  "deploying",
+  "discover",
+  "discovers",
+  "discovering",
+  "rank",
+  "ranks",
+  "ranking",
 ]);
 
 const RANK_STOP_WORDS = new Set([
@@ -135,7 +169,7 @@ const RANK_STOP_WORDS = new Set([
   "website",
 ]);
 
-const SHORT_TECH_TERMS = new Set(["ai", "ml", "ui", "db"]);
+const SHORT_TECH_TERMS = new Set(["ai", "ml", "ui", "db", "api", "sdk", "cli", "mcp", "llm", "rpc"]);
 
 const TERM_ALIASES: Record<string, string[]> = {
   authentication: ["auth", "authn", "authorization"],
@@ -366,7 +400,7 @@ function buildFallbackRecommendations(
  * GitHub repository search ANDs words within a single query, so the discovery
  * stage must prefer several short queries over one natural-language sentence.
  */
-export function buildFallbackSearchQueries(goal: string): string[] {
+export export function buildFallbackSearchQueries(goal: string): string[] {
   const normalized = normalizeGoal(goal);
   if (!normalized) {
     return [];
@@ -396,53 +430,50 @@ export function buildFallbackSearchQueries(goal: string): string[] {
     queries.push(cleaned);
   };
 
-  // Short goals are already suitable search queries unless they contain an
-  // explicit conjunction or comma that produced multiple capability clauses.
+  // Keep one compact capability phrase per clause. Long natural-language goals
+  // often contain intent verbs that make GitHub's AND search too restrictive,
+  // so phrases are deliberately short and do not consume the whole query budget.
   if (clauses.length <= 1 && allWords.length <= 4) {
     add(allWords.join(" "));
-    return queries;
-  }
-
-  for (let index = 0; index < clauses.length; index += 1) {
-    const words = clauses[index];
-    if (!words) {
-      continue;
-    }
-
-    // Strong compound terms such as "self-hosted" are useful independently.
-    for (const word of words) {
-      if (word.includes("-")) {
-        add(word);
-      }
-    }
-
-    // Preserve a broader anchor for the first clause and shorter capability
-    // phrases for subsequent clauses.
-    add(words.slice(0, index === 0 ? 4 : 3).join(" "));
-
-    if (queries.length >= MAX_SEARCH_QUERIES) {
-      return queries.slice(0, MAX_SEARCH_QUERIES);
-    }
-  }
-
-  // Long goals without useful separators need extra discovery angles. Add the
-  // beginning, end and a few distinctive individual terms rather than sending
-  // the whole sentence to GitHub.
-  if (clauses.length <= 1 && allWords.length > 4) {
-    add(allWords.slice(0, 3).join(" "));
-    add(allWords.slice(-3).join(" "));
-
-    for (const word of allWords) {
-      if (word.length >= 5 || SHORT_TECH_TERMS.has(word.toLowerCase())) {
-        add(word);
-      }
-      if (queries.length >= MAX_SEARCH_QUERIES) {
+  } else {
+    for (const words of clauses) {
+      add(words.slice(0, 3).join(" "));
+      if (queries.length >= 3) {
         break;
       }
     }
   }
 
-  // Final guard for unusual punctuation-heavy input.
+  // Always reserve room for broad capability terms. This is the safety net for
+  // goals such as "build and deploy a TypeScript MCP server on Cloudflare
+  // Workers", where a precise multi-word search may have zero GitHub matches
+  // even though "mcp", "cloudflare", or "workers" has many useful candidates.
+  const broadWords = [...allWords].sort((a, b) => {
+    const score = (word: string): number => {
+      const lower = word.toLowerCase();
+      if (SHORT_TECH_TERMS.has(lower)) return 3;
+      if (word.includes("-")) return 2;
+      return 1;
+    };
+    return score(b) - score(a);
+  });
+
+  for (const word of broadWords) {
+    const lower = word.toLowerCase();
+    if (word.includes("-") || SHORT_TECH_TERMS.has(lower) || word.length >= 4) {
+      add(word);
+    }
+    if (queries.length >= MAX_SEARCH_QUERIES) {
+      break;
+    }
+  }
+
+  // If there is still room, add a trailing two-word phrase. This often captures
+  // a concrete platform or capability name such as "cloudflare workers".
+  if (queries.length < MAX_SEARCH_QUERIES && allWords.length >= 2) {
+    add(allWords.slice(-2).join(" "));
+  }
+
   if (queries.length === 0 && allWords.length > 0) {
     add(allWords.slice(0, 4).join(" "));
   }

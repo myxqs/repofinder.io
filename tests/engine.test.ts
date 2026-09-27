@@ -80,6 +80,7 @@ describe("parseRepo", () => {
 });
 
 // Regression coverage for live RepoFinder v2 smoke-test failures.
+// Direct branch CI validates this production-based repair independently of divergent main.
 describe("buildFallbackSearchQueries", () => {
   it("keeps broad MCP and GitHub discovery terms for a long natural-language goal", () => {
     const queries = buildFallbackSearchQueries(

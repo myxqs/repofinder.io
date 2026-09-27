@@ -79,6 +79,7 @@ describe("parseRepo", () => {
   });
 });
 
+// Regression coverage for live RepoFinder v2 smoke-test failures.
 describe("buildFallbackSearchQueries", () => {
   it("keeps broad MCP and GitHub discovery terms for a long natural-language goal", () => {
     const queries = buildFallbackSearchQueries(

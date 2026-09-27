@@ -400,7 +400,7 @@ function buildFallbackRecommendations(
  * GitHub repository search ANDs words within a single query, so the discovery
  * stage must prefer several short queries over one natural-language sentence.
  */
-export export function buildFallbackSearchQueries(goal: string): string[] {
+export function buildFallbackSearchQueries(goal: string): string[] {
   const normalized = normalizeGoal(goal);
   if (!normalized) {
     return [];

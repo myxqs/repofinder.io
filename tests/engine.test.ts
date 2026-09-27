@@ -11,7 +11,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseRepo } from "../src/github.ts";
 import { parseStructured } from "../src/openai.ts";
-import { looksLikeUrl, normalizeUrl, htmlToText, clamp, ecosystemLanguages, looksLikeNonTool, isPublicHostname, rankFallbackCandidates, InputError } from "../src/engine.ts";
+import { looksLikeUrl, normalizeUrl, htmlToText, clamp, ecosystemLanguages, looksLikeNonTool, isPublicHostname, rankFallbackCandidates, buildFallbackSearchQueries, InputError } from "../src/engine.ts";
 import { anonymousActorKey, enforceRateLimit, type RateLimitBinding } from "../src/security.ts";
 
 describe("anonymous rate limits", () => {
@@ -76,6 +76,31 @@ describe("parseRepo", () => {
     for (const bad of ["fastapi", "", "   ", "https://gitlab.com/owner/repo", "owner/repo/extra"]) {
       assert.equal(parseRepo(bad), null, JSON.stringify(bad));
     }
+  });
+});
+
+describe("buildFallbackSearchQueries", () => {
+  it("keeps broad MCP and GitHub discovery terms for a long natural-language goal", () => {
+    const queries = buildFallbackSearchQueries(
+      "Find complementary repositories useful for building and hardening a self-hosted MCP server that discovers and ranks GitHub repositories.",
+    ).map((query) => query.toLowerCase());
+
+    assert.ok(queries.some((query) => query === "mcp" || query.includes("mcp")), queries.join(" | "));
+    assert.ok(queries.some((query) => query === "github" || query.includes("github")), queries.join(" | "));
+    assert.ok(queries.every((query) => !query.includes("useful building")), queries.join(" | "));
+  });
+
+  it("preserves broad TypeScript, MCP and Cloudflare searches for deployment goals", () => {
+    const queries = buildFallbackSearchQueries(
+      "Find complementary repositories for building and deploying a TypeScript MCP server on Cloudflare Workers.",
+    ).map((query) => query.toLowerCase());
+
+    assert.ok(queries.some((query) => query === "mcp"), queries.join(" | "));
+    assert.ok(queries.some((query) => query === "typescript"), queries.join(" | "));
+    assert.ok(
+      queries.some((query) => query === "cloudflare" || query === "cloudflare workers"),
+      queries.join(" | "),
+    );
   });
 });
 
